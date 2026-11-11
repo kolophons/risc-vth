@@ -1,5 +1,5 @@
 {
-  inputs.nixpkgs.url = "github:NixOS/nixpks/nixos-unstable";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   outputs = { nixpkgs, ... }:
     let
       system = "x86_64-linux";
@@ -9,6 +9,8 @@
         packages = [
           pkgs.pkgsCross.riscv64-embedded.buildPackages.binutils
           pkgs.qemu
+          pkgs.xxd
+          pkgs.gdb
         ];
       };
     };
