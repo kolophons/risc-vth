@@ -1,2 +1,5 @@
 .ephemera/
 reference/jonesforth
+*.o
+*.elf
+*.bin
