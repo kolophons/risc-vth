@@ -42,3 +42,34 @@ riscv64-none-elf-objdump -d boot.elf
 # the additional -r shows "relocation records" alongside instructions
 riscv64-none-elf-objdump -dr boot.o
   #+end_src
+
+* Tricky stuff
+
+#+begin_quote
+Here’s a concrete example with illustrative addresses:
+
+| Memory address | Contents | What this location is |
+|---|---|---|
+| 0x80001000 | 0x80002000 | A program cell containing an XT |
+| 0x80002000 | 0x80000300 | The word’s code field |
+| 0x80000300 | Machine instructions | The routine itself |
+
+ld t0, 0(s1)             # t0 becomes 0x80002000 — the XT
+addi s1, s1, CELL_BYTES  # s1 becomes 0x80001008 — next program cell
+ld t1, 0(t0)             # t1 becomes 0x80000300 — the code address
+jalr ra, 0(t1)           # CPU begins executing at 0x80000300;
+                        # ra receives the address of the following instruction
+#+end_quote
+
+For a FORTH word
+#+begin_quote
+XT --> [ address of docol ] <- code field
+       [ first body entry ]
+       [ ...              ]
+       [ XT of EXIT       ]
+#+end_quote
+
+A *primitive's* code field contains the address of its own
+  machine-code routine
+
+

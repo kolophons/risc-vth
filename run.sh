@@ -8,7 +8,7 @@ if [ "${1:-}" = "-d" ]; then DEBUG=true; fi
 
 # assemble, link, and objcopy
 echo ":: assembling boot.o ::"
-riscv64-none-elf-as -march=rv64i -mabi=lp64 -o boot.o boot.s
+riscv64-none-elf-as -march=rv64im -mabi=lp64 -o boot.o boot.s
 echo ":: linking boot.elf"
 NIX_BUILD_ID_STYLE=none riscv64-none-elf-ld -Ttext=0x80000000 --build-id=none -o boot.elf boot.o
 echo ":: objcopy boot.bin"

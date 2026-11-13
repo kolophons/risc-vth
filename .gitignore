@@ -1,5 +1,6 @@
 .ephemera/
 reference/jonesforth
+reference/riscv-asm-manual
 *.o
 *.elf
 *.bin
