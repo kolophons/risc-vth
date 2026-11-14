@@ -28,7 +28,8 @@ display/8bx &token_buffer
 display/8cb &token_buffer
 
 display "=== COMPILE SPACE ==="
-display/4ag &compile_space
+display/8ag &compile_space
+display/1gd &compiling_ptr
 display/1ag &here_ptr
 
 # set up a breakpoint

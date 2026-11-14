@@ -10,6 +10,7 @@
 # s2: return stack pointer
 
 .equ CELL_BYTES, 8
+.equ F_IMMEDIATE, 1
 
 .macro move_stack cells
   # \cells means "substitute macro argument for cells here"
@@ -20,6 +21,22 @@
 .macro _lit _sym:req
   .dword xt_lit
   .dword \_sym
+.endm
+
+# compile fetching an address
+.macro _fetch _addr:req # ( -- value )
+  .dword xt_lit
+  .dword \_addr
+  .dword xt_fetch
+.endm
+
+# store a literal value in memory
+.macro _store _sym:req _addr:req 
+  .dword xt_lit
+  .dword \_sym # ( sym )
+  .dword xt_lit
+  .dword \_addr # ( sym addr )
+  .dword xt_store
 .endm
 
 # compile an unconditional branch
@@ -213,6 +230,14 @@ word_swap: # ( a b -- b a )
   set_stack_value t1, 0
   ret
 
+# boolean helpers
+word_and: # ( a b -- a&b )
+  pop_data_stack t0
+  pop_data_stack t1
+  and t2, t1, t0
+  push_data_stack t2
+  ret
+
 word_fetch: # ( addr -- value )
   pop_data_stack t0 # load address to register t0
   ld t0, 0(t0)      # t0 = *t0
@@ -261,7 +286,7 @@ word_exit:
 word_key: # [t0]=[UART]
     li t0, 0x10000000
 
-key_wait:
+  key_wait:
     lbu t1, 5(t0)     # read UART status
     andi t1, t1, 1    # keep only input-ready bit
     beqz t1, key_wait # if zero, check again
@@ -277,24 +302,27 @@ word_branch: # [s1]=*s1
     ret
 
 word_zbranch: # ( flag -- ) ( executes branch if flag=0 )
-  pop_data_stack t0       # pop data stack
-  beqz t0, word_branch    # check if 0 -- if so, jump to it.
-  addi s1, s1, CELL_BYTES # move forward one cell
-  ret
+    pop_data_stack t0       # pop data stack
+    beqz t0, word_branch    # check if 0 -- if so, jump to it.
+
+    # otherwise
+    addi s1, s1, CELL_BYTES # move forward one cell
+    ret
+
 
 word_to_cfa: # ( entry -- xt )
-  # >CFA
-  # entry is a dictionary-entry address
-  # load the xt of a dictionary entry onto the stack
-  pop_data_stack t0
-  lbu t1, CELL_BYTES(t0) # read nlen into t1
-  addi t0, t0, 10        # skip link, nlen, flags
-  add t0, t0, t1         # skip name bytes
-  # round up to next cell boundry
-  addi t0, t0, 7
-  andi t0, t0, -8 # ( address + 7 ) & ~7
-  push_data_stack t0
-  ret
+    # >CFA
+    # entry is a dictionary-entry address
+    # load the xt of a dictionary entry onto the stack
+    pop_data_stack t0
+    lbu t1, CELL_BYTES(t0) # read nlen into t1
+    addi t0, t0, 10        # skip link, nlen, flags
+    add t0, t0, t1         # skip name bytes
+    # round up to next cell boundry
+    addi t0, t0, 7
+    andi t0, t0, -8 # ( address + 7 ) & ~7 -- ceil to next multiple of 8
+    push_data_stack t0
+    ret
 
 word_find: # ( addr len -- entry|0 )
     # FIND
@@ -341,6 +369,42 @@ word_find: # ( addr len -- entry|0 )
     push_data_stack t2
     ret
 
+# compiles a dictionary entry header
+word_make_header: # ( addr len -- entry )
+    pop_data_stack t1 # [t1]=name len
+    pop_data_stack t0 # [t0]=source name address
+
+    la t2, here_ptr   # [t2] = here_ptr
+    ld t3, 0(t2)      # [t3] = *here_ptr
+
+    la t4, latest_ptr 
+    ld t4, 0(t4)      # [t4] = latest_ptr*
+
+    # [t3] points to the new dictionary entry
+    sd t4, 0(t3)      # store link to previous latest entry
+    sb t1, 8(t3)      # store name length
+    sb zero, 9(t3)    # store 0 flag
+
+    addi t4, t3, 10   # set [t4] to point at entry's name field.
+
+  header_copy:
+    beqz t1, header_align # if name is fully written, jump to alignment
+    # read one byte from name_address
+    lbu t5, 0(t0)     # load byte from name address
+    sb t5, 0(t4)      # st
+    # iterate
+    addi t0, t0, 1    # name_address++
+    addi t4, t4, 1    # entry_name++
+    addi t1, t1, -1   # remaining_length--
+    j header_copy
+
+  header_align:
+    addi t4, t4, 7     
+    andi t4, t4, -8   # align upcoming code field to next multiple of 8
+    sd t4, 0(t2)       # update HERE
+    push_data_stack t3 # return entry's address
+    ret
+
 
 .balign CELL_BYTES # align to 8 bytes
 # build the program table.
@@ -355,6 +419,19 @@ word_find: # ( addr len -- entry|0 )
 #
 # so, a dictionary entry is at least 3 cells (when nlen < 7, 3 cells)
 # for colon-words, the entry also contains the threaded body.
+
+# lookup helpers:
+.macro _fetch_entry_nlen # ( entry -- nlen )
+    _lit 8
+    .dword xt_add
+    .dword xt_cfetch
+.endm
+
+.macro _fetch_entry_flags # ( entry -- flags )
+    _lit 9
+    .dword xt_add
+    .dword xt_cfetch
+.endm
 
 
 dict_dup:
@@ -379,6 +456,53 @@ dict_emit:
     .balign CELL_BYTES
 xt_emit:  .dword word_emit
 
+dict_semicolon: # append EXIT to a word, then set compiling_ptr*=0
+    .dword dict_emit
+    .byte 1
+    .byte F_IMMEDIATE
+    .ascii ";"
+    .balign CELL_BYTES
+xt_semicolon: 
+    .dword docol
+
+    _fetch pending_entry  # ( entry|0 )
+    .dword xt_dup
+    _zbranch bad_token    # reject ; without an active definition
+
+    _lit xt_exit
+    .dword xt_comma # append EXIT to new def
+
+    _lit latest_ptr
+    .dword xt_store # set latest* = entry
+
+    _store 0 pending_entry # unset pending_entry
+    _store 0 compiling_ptr # unset compiling flag
+    .dword xt_exit # return from semicolon
+
+dict_colon:
+    .dword dict_semicolon
+    .byte 1
+    .byte 0       # ordinary
+    .ascii ":"
+    .balign CELL_BYTES
+xt_colon: # ( -- )
+    .dword docol
+    .dword xt_read_token # ( addr len|0 )
+    .dword xt_dup
+    _zbranch colon_bad_name
+    .dword xt_make_header # ( entry )
+    _lit pending_entry    
+    .dword xt_store       # keep track of current word entry
+    _lit docol
+    .dword xt_comma       # write code field (docol, since it's a forth word)
+    _store -1 compiling_ptr # set COMPILING flag to true
+    .dword xt_exit        # return to interpret
+  colon_bad_name:
+    .dword xt_2drop
+    _lit 63
+    .dword xt_emit        # emit ?
+    .dword xt_hang 
+
 xt_find: .dword word_find
 xt_mul: .dword word_mul
 
@@ -397,11 +521,16 @@ xt_over:  .dword word_over
 xt_nip:   .dword word_nip
 xt_rot:   .dword word_rot
 xt_nrot:  .dword word_nrot
+
+# boolean helpers
+xt_and:   .dword word_and
+
 xt_store: .dword word_store
 xt_fetch: .dword word_fetch
 xt_cstore: .dword word_cstore
 xt_cfetch: .dword word_cfetch
 xt_execute: .dword word_execute
+xt_make_header: .dword word_make_header
 
 xt_ten_times: # ( n -- n*10 )
   .dword docol
@@ -537,23 +666,19 @@ xt_skip_blanks:
 
 xt_here:
     .dword docol
-    .dword xt_lit
-    .dword here_ptr
-    .dword xt_fetch
+    _fetch here_ptr
     .dword xt_exit
 
-xt_comma:
+xt_comma: # ( xt -- )
     .dword docol
-    .dword xt_here
-    .dword xt_swap
-    .dword xt_over
-    .dword xt_store
-    .dword xt_lit
-    .dword CELL_BYTES
-    .dword xt_add
-    .dword xt_lit
-    .dword here_ptr
-    .dword xt_store
+    .dword xt_here  # ( xt here_ptr )
+    .dword xt_swap  # ( here_ptr xt ) 
+    .dword xt_over  # ( here_ptr xt here_ptr )
+    .dword xt_store # ( here_ptr ) store xt at here_ptr
+    _lit CELL_BYTES
+    .dword xt_add   # ( here_ptr++ )
+    _lit here_ptr   # ( here_ptr+1 here_ptr )
+    .dword xt_store # increment here_ptr to next free memory cell
     .dword xt_exit
 
 scratch:
@@ -580,25 +705,49 @@ program:
     .dword xt_read_token # ( addr len )
     .dword xt_over
     .dword xt_over
-    .dword xt_find # ( entry|0 )
+    .dword xt_find # ( addr len entry|0 )
     .dword xt_dup
-    _zbranch try_number
+    _zbranch try_number 
     .dword xt_nip
     .dword xt_nip
     # word found
-    .dword xt_to_cfa  # ( xt )
-    .dword xt_execute # do word
+
+    # check if we're compiling
+    _fetch compiling_ptr # ( entry compiling? )
+    _zbranch execute_entry # not compiling? execute it
+
+    # otherwise, check if it's an immediate word
+    .dword xt_dup         # ( entry entry )
+    _fetch_entry_flags    # ( entry flags )
+    _lit F_IMMEDIATE      # ( entry flags F_IMMEDIATE )
+    .dword xt_and         # ( entry immediate? )
+    _zbranch compile_entry # if not immediate, then compile
+  execute_entry:
+    .dword xt_to_cfa      # ( xt )
+    .dword xt_execute     # do word
     _branch interpret_again
+  compile_entry:
+    .dword xt_to_cfa       # ( xt )
+    .dword xt_comma        # compile xt to HERE and increment HERE
+    _branch interpret_again
+
+    # else, execute it
   try_number: # ( addr len 0 )
     .dword xt_drop # ( addr len )
-    .dword xt_parse_number # ( number success? )
+    .dword xt_parse_number    # ( number success? )
     _zbranch bad_token
+    _fetch compiling_ptr      # ( number compiling? )
+    _zbranch interpret_again  # interpreting, retain the number
+    _lit xt_lit               # ( number xt-of-LIT )
+    .dword xt_comma           # write xt_lit
+    .dword xt_comma           # write number
     _branch interpret_again
   bad_token:
     .dword xt_drop
 
     _lit 63
     .dword xt_emit
+    stop:
     .dword xt_hang
 
 # program:
@@ -622,8 +771,12 @@ program:
 #   .dword xt_hang 
 
 .balign CELL_BYTES
+compiling_ptr:
+    .dword 0 # boolean flag, either 0 or -1 by convention
 latest_ptr:
-    .dword dict_emit
+    .dword dict_colon
+pending_entry:
+    .dword 0
 
 token_buffer:
     .space 32
