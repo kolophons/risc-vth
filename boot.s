@@ -12,26 +12,57 @@
 .equ CELL_BYTES, 8
 .equ F_IMMEDIATE, 1
 
+.macro _word name:req, id:req, code:req, previous:req, flags=0
+    .balign CELL_BYTES
+dict_\id\():
+    .dword \previous
+    .byte .Lname_end\@ - .Lname_start\@
+    .byte \flags
+.Lname_start\@:
+    .ascii "\name"
+.Lname_end\@:
+    .balign CELL_BYTES
+xt_\id\():
+    .dword \code
+.endm
+
+# expand a list of words a, b, c into:
+# .dword xt_a
+# .dword xt_b
+# .dword xt_c
+.macro .xt words:vararg
+    .irp word, \words
+        .dword xt_\word
+    .endr
+.endm
+
 .macro move_stack cells
   # \cells means "substitute macro argument for cells here"
   addi s0, s0, (\cells * CELL_BYTES)
 .endm
 
 # compile a literal
-.macro _lit _sym:req
+.macro .lit _sym:req
   .dword xt_lit
   .dword \_sym
 .endm
 
 # compile fetching an address
-.macro _fetch _addr:req # ( -- value )
+.macro .fetch _addr:req # ( -- value )
   .dword xt_lit
   .dword \_addr
   .dword xt_fetch
 .endm
 
+.macro .equal _literal:req # ( value -- value flag )
+  .dword xt_dup
+  .dword xt_lit
+  .dword \_literal
+  .dword xt_equal
+.endm
+
 # store a literal value in memory
-.macro _store _sym:req _addr:req 
+.macro .store _sym:req _addr:req 
   .dword xt_lit
   .dword \_sym # ( sym )
   .dword xt_lit
@@ -40,13 +71,13 @@
 .endm
 
 # compile an unconditional branch
-.macro _branch _label:req
+.macro .branch _label:req
   .dword xt_branch
   .dword \_label
 .endm
 
 # compile a zero-branch
-.macro _zbranch _label:req
+.macro .zbranch _label:req
   .dword xt_zbranch
   .dword \_label
 .endm
@@ -111,8 +142,8 @@ next_word:
   jalr ra, 0(t1) # jump PC to the code address.
   j next_word
 
-hang:
-    j hang
+word_hang:
+    j word_hang
 
 word_uless: # ( u1 u2 -- flag ) ( u1<u2? )
     pop_data_stack t1
@@ -138,6 +169,14 @@ word_add:
   sd t1, 0(s0)      # store t1 at top of stack
   ret # transfer execution back to address in ra
 
+word_sub:
+  # - : pop one value and subtract it from the remaining top
+  pop_data_stack t0
+  get_stack_value t1, 0
+  sub t1, t1, t0
+  set_stack_value t1, 0
+  ret
+
 word_mul: # ( n1 n2 -- n1*n2 )
   # *
   pop_data_stack t0
@@ -154,6 +193,19 @@ word_divmod: # ( n1 n2 -- rem quot )
   rem t3, t1, t0   # rem
   push_data_stack t3
   push_data_stack t2
+  ret
+
+
+word_plus_one: # ( n1 -- n1+1 )
+  get_stack_value t0, 0
+  addi t0, t0, 1
+  set_stack_value t0, 0
+  ret
+
+word_minus_one: # ( n1 -- n1+1 )
+  get_stack_value t0, 0
+  addi t0, t0, -1
+  set_stack_value t0, 0
   ret
 
 word_udivmod: # ( u1 u2 -- rem quot )
@@ -186,11 +238,18 @@ word_dup:
   sd t0, 0(s0)    # load from t0 into *s0 -- copy.
   ret
 
+word_twodup: # ( a b -- a b a b )
+  get_stack_value t0, 0 # b
+  get_stack_value t1, 1 # a
+  push_data_stack t1 # ( a b a )
+  push_data_stack t0 # ( a b a b )
+  ret
+
 word_drop: # ( a -- )
   addi s0, s0, CELL_BYTES
   ret
 
-word_2drop: # ( a b -- )
+word_twodrop: # ( a b -- )
   addi s0, s0, CELL_BYTES*2
   ret
 
@@ -198,6 +257,14 @@ word_over: # ( a b -- a b a )
   ld t0, CELL_BYTES(s0)
   push_data_stack t0
   ret
+
+word_twoover: # ( a b c d -- a b c d a b )
+  get_stack_value t0, 3 # a
+  get_stack_value t1, 2 # b
+  push_data_stack t0 # ( a b c d a )
+  push_data_stack t1 # ( a b c d a b )
+  ret
+
 
 word_nip: # (a b -- b )
   get_stack_value t0, 0
@@ -230,11 +297,37 @@ word_swap: # ( a b -- b a )
   set_stack_value t1, 0
   ret
 
-# boolean helpers
+word_twoswap: # ( a b c d -- c d a b )
+  get_stack_value t0, 0 # d
+  get_stack_value t1, 1 # c
+  get_stack_value t2, 2 # b
+  get_stack_value t3, 3 # a
+
+  set_stack_value t2, 0 # ( a b c b )
+  set_stack_value t3, 1 # ( a b a b )
+  set_stack_value t0, 2 # ( a d a b )
+  set_stack_value t1, 3 # ( c d a b )
+  ret
+
+# bitwise helpers
 word_and: # ( a b -- a&b )
   pop_data_stack t0
   pop_data_stack t1
   and t2, t1, t0
+  push_data_stack t2
+  ret
+
+word_or: # ( a b -- a|b )
+  pop_data_stack t0
+  pop_data_stack t1
+  or t2, t1, t0
+  push_data_stack t2
+  ret
+
+word_xor: # ( a b -- a xor b )
+  pop_data_stack t0
+  pop_data_stack t1
+  xor t2, t1, t0
   push_data_stack t2
   ret
 
@@ -421,365 +514,418 @@ word_make_header: # ( addr len -- entry )
 # for colon-words, the entry also contains the threaded body.
 
 # lookup helpers:
-.macro _fetch_entry_nlen # ( entry -- nlen )
-    _lit 8
+.macro .fetch_entry_nlen # ( entry -- nlen )
+    .lit 8
     .dword xt_add
     .dword xt_cfetch
 .endm
 
-.macro _fetch_entry_flags # ( entry -- flags )
-    _lit 9
+.macro .fetch_entry_flags # ( entry -- flags )
+    .lit 9
     .dword xt_add
     .dword xt_cfetch
 .endm
 
 
+# Typing the first dictionary entry out by hand:
 dict_dup:
-    .dword 0              # first entry
-    .byte 3
-    .byte 0
+    .dword 0 # first word
+    .byte 3  # length
+    .byte 0  # normal execution
     .ascii "DUP"
     .balign CELL_BYTES
-xt_dup:   .dword word_dup
-dict_add:
-    .dword dict_dup       # previous dictionary entry
-    .byte 1               # length
-    .byte 0
-    .ascii "+"
-    .balign CELL_BYTES
-xt_add:   .dword word_add
-dict_emit:
-    .dword dict_add
-    .byte 4
-    .byte 0
-    .ascii "EMIT"
-    .balign CELL_BYTES
-xt_emit:  .dword word_emit
+xt_dup:
+    .dword word_dup
 
-dict_semicolon: # append EXIT to a word, then set compiling_ptr*=0
-    .dword dict_emit
-    .byte 1
-    .byte F_IMMEDIATE
-    .ascii ";"
-    .balign CELL_BYTES
-xt_semicolon: 
-    .dword docol
+# Thereafter, I use this macro:
+# _word "name", id, XT, flags
+# Length is calculated in the macro body
 
-    _fetch pending_entry  # ( entry|0 )
-    .dword xt_dup
-    _zbranch bad_token    # reject ; without an active definition
+# stack helpers
+_word "2DUP", twodup, word_twodup, dict_dup
+_word "DROP", drop, word_drop, dict_twodup, 0
+_word "2DROP", twodrop, word_twodrop, dict_drop, 0
+_word "SWAP", swap, word_swap, dict_twodrop, 0
+_word "OVER", over, word_over, dict_swap, 0
+_word "2OVER", twoover, word_twoover, dict_over, 0
+_word "NIP", nip, word_nip, dict_twoover, 0
+_word "ROT", rot, word_rot, dict_nip, 0
+_word "-ROT", nrot, word_nrot, dict_rot, 0
 
-    _lit xt_exit
-    .dword xt_comma # append EXIT to new def
+# arithmetic:
+_word "+", add, word_add, dict_nrot
+_word "-", sub, word_sub, dict_add
+_word "*", mul, word_mul, dict_sub
+_word "/MOD", divmod, word_divmod, dict_mul
+_word "U/MOD", udivmod, word_udivmod, dict_divmod
+_word "1-", minus_one, word_minus_one, dict_udivmod
+_word "1+", plus_one, word_plus_one, dict_minus_one
+_word "EMIT", emit, word_emit, dict_plus_one
+_word ";", semicolon, docol, dict_emit, F_IMMEDIATE
+    .fetch pending_entry  # ( entry|0 )
+    .xt dup
+    .zbranch bad_token    # reject ; without an active definition
 
-    _lit latest_ptr
-    .dword xt_store # set latest* = entry
+    .lit xt_exit
+    .xt comma # append EXIT to new def
 
-    _store 0 pending_entry # unset pending_entry
-    _store 0 compiling_ptr # unset compiling flag
-    .dword xt_exit # return from semicolon
+    .lit latest_ptr
+    .xt store # set latest* = entry
 
-dict_colon:
-    .dword dict_semicolon
-    .byte 1
-    .byte 0       # ordinary
-    .ascii ":"
-    .balign CELL_BYTES
-xt_colon: # ( -- )
-    .dword docol
-    .dword xt_read_token # ( addr len|0 )
-    .dword xt_dup
-    _zbranch colon_bad_name
-    .dword xt_make_header # ( entry )
-    _lit pending_entry    
-    .dword xt_store       # keep track of current word entry
-    _lit docol
-    .dword xt_comma       # write code field (docol, since it's a forth word)
-    _store -1 compiling_ptr # set COMPILING flag to true
-    .dword xt_exit        # return to interpret
+    .store 0 pending_entry # unset pending_entry
+    .store 0 compiling_ptr # unset compiling flag
+    .xt exit # return from semicolon
+
+_word ":", colon, docol, dict_semicolon, 0
+    .xt read_token # ( addr len|0 )
+    .xt dup
+    .zbranch colon_bad_name
+    .xt make_header # ( entry )
+    .lit pending_entry    
+    .xt store       # keep track of current word entry
+    .lit docol
+    .xt comma       # write code field (docol, since it's a forth word)
+    .store -1 compiling_ptr # set COMPILING flag to true
+    .xt exit        # return to interpret
   colon_bad_name:
-    .dword xt_2drop
-    _lit 63
-    .dword xt_emit        # emit ?
-    .dword xt_hang 
+    .xt twodrop
+    .lit 63
+    .xt emit        # emit ?
+    .xt hang 
 
-xt_find: .dword word_find
-xt_mul: .dword word_mul
+_word "ECHO-ON", echo_on, docol, dict_colon, 0
+    .store -1 echo_enabled
+    .xt exit
 
-xt_to_cfa: .dword word_to_cfa
-xt_uless: .dword word_uless
-xt_branch: .dword word_branch
-xt_zbranch: .dword word_zbranch
-xt_lit:   .dword word_lit
-xt_exit:  .dword word_exit
-xt_key:   .dword word_key
-xt_hang:  .dword hang
-xt_drop:  .dword word_drop
-xt_2drop:  .dword word_2drop
-xt_swap:  .dword word_swap
-xt_over:  .dword word_over
-xt_nip:   .dword word_nip
-xt_rot:   .dword word_rot
-xt_nrot:  .dword word_nrot
+_word "ECHO-OFF", echo_off, docol, dict_echo_on, 0
+    .store 0 echo_enabled
+    .xt exit
 
-# boolean helpers
-xt_and:   .dword word_and
+_word "FIND", find, word_find, dict_echo_off, 0
+_word ">CFA", to_cfa, word_to_cfa, dict_find, 0
+_word "U<", uless, word_uless, dict_to_cfa, 0
 
-xt_store: .dword word_store
-xt_fetch: .dword word_fetch
-xt_cstore: .dword word_cstore
-xt_cfetch: .dword word_cfetch
-xt_execute: .dword word_execute
-xt_make_header: .dword word_make_header
+_word "BRANCH", branch, word_branch, dict_uless, 0
+_word "ZBRANCH", zbranch, word_zbranch, dict_branch, 0
+_word "LIT", lit, word_lit, dict_zbranch, 0
+_word "EXIT", exit, word_exit, dict_lit, 0
+_word "KEY", key, word_key, dict_exit, 0
+_word "HANG", hang, word_hang, dict_key, 0
+
+# bitwise helpers
+_word "AND", and, word_and, dict_hang, 0
+_word "OR", or, word_or, dict_and, 0
+_word "XOR", xor, word_xor, dict_or, 0
+
+# memory helpers
+_word "!", store, word_store, dict_xor, 0
+_word "@", fetch, word_fetch, dict_store, 0
+_word "C!", cstore, word_cstore, dict_fetch, 0
+_word "C@", cfetch, word_cfetch, dict_cstore, 0
+_word "EXECUTE", execute, word_execute, dict_cfetch, 0
+_word "MAKE-HEADER", make_header, word_make_header, dict_execute, 0
 
 xt_ten_times: # ( n -- n*10 )
   .dword docol
-  _lit 10
-  .dword xt_mul
-  .dword xt_exit
+  .lit 10
+  .xt mul
+  .xt exit
 
-xt_parse_number: # ( addr len )
-    .dword docol 
-    .dword xt_dup
-    _zbranch parse_bad_input # reject empty token
-    _lit 0
+_word "PARSE-NUMBER", parse_number, docol, dict_make_header
+    .xt dup
+    .zbranch parse_bad_input # reject empty token
+    .lit 0
   parse_again: # ( addr remaining acc )
-    .dword xt_over # ( addr rem acc rem )
-    _zbranch parse_done # if remaining == 0, we're done
-    .dword xt_ten_times
-    .dword xt_rot # ( remaining acc*10 addr )
-    .dword xt_dup
-    .dword xt_lit
+    .xt over # ( addr rem acc rem )
+    .zbranch parse_done # if remaining == 0, we're done
+    .xt ten_times
+    .xt rot # ( remaining acc*10 addr )
+    .xt dup
+    .xt lit
     .dword 1
-    .dword xt_add
-    .dword xt_swap
-    .dword xt_cfetch # ( remaining acc*10 next-addr char )
-    _lit -48
-    .dword xt_add # ( remaining acc*10 next-addr digit )
-    .dword xt_dup
-    _lit 10
-    .dword xt_uless # ( remaining acc*10 next-addr digit digit<10? )
-    _zbranch parse_bad_digit
+    .xt add
+    .xt swap
+    .xt cfetch # ( remaining acc*10 next-addr char )
+    .lit -48
+    .xt add # ( remaining acc*10 next-addr digit )
+    .xt dup
+    .lit 10
+    .xt uless # ( remaining acc*10 next-addr digit digit<10? )
+    .zbranch parse_bad_digit
 
-    .dword xt_rot 
-    .dword xt_add # ( remaining next-addr new-acc ) new-acc=acc*10+digit
-    .dword xt_rot # ( next-addr new-acc remaining )
-    .dword xt_lit
+    .xt rot 
+    .xt add # ( remaining next-addr new-acc ) new-acc=acc*10+digit
+    .xt rot # ( next-addr new-acc remaining )
+    .xt lit
     .dword -1
-    .dword xt_add
-    .dword xt_swap # ( next-addr new-remaining new-acc ) decrement remaining
-    _branch parse_again
+    .xt add
+    .xt swap # ( next-addr new-remaining new-acc ) decrement remaining
+    .branch parse_again
   parse_done: # ( addr 0 accumulator )
-    .dword xt_nip
-    .dword xt_nip
-    _lit -1
-    .dword xt_exit # ( accumulator flag-true )
+    .xt nip
+    .xt nip
+    .lit -1
+    .xt exit # ( accumulator flag-true )
   parse_bad_digit: # ( remaining acc*10 next-addr bad-digit )
-    .dword xt_2drop
+    .xt twodrop
   parse_bad_input: # ( leftover-cell-1 leftover-cell-2 )
-    .dword xt_2drop
-    _lit 0
-    _lit 0
-    .dword xt_exit
+    .xt twodrop
+    .lit 0
+    .lit 0
+    .xt exit
 
 
-xt_read_token:
-    .dword docol
-    .dword xt_skip_blanks # ( char )
-    .dword xt_lit
+_word "READ-TOKEN", read_token, docol, dict_parse_number, 0
+    .xt skip_blanks # ( char )
+    .xt lit
     .dword 0 # initialize token buffer offset
-    .dword xt_swap # ( 0 char )
+    .xt swap # ( 0 char )
 
     read_token_again: # ( offset char )
-    .dword xt_over # ( offset char offset )
+    .xt over # ( offset char offset )
 
     # begin overflow handling
-    .dword xt_dup # ( offset char offset offset )
-    _lit 32 # ( ... 32 )
-    .dword xt_uless # ( offset char offset offset<32? )
-    .dword xt_zbranch
+    .xt dup # ( offset char offset offset )
+    .lit 32 # ( ... 32 )
+    .xt uless # ( offset char offset offset<32? )
+    .xt zbranch
     .dword read_token_overflow # if we've read 32 bytes, overflow
 
     read_token_continue:
-    .dword xt_lit
+    .xt lit
     .dword token_buffer # ( offset char offset addr )
-    .dword xt_add # ( offset char addr+o )
-    .dword xt_cstore # ( offset )
-    _lit 1
-    .dword xt_add # ( offset+1 )
-    .dword xt_key
-    .dword xt_dup
-    .dword xt_lit
+    .xt add # ( offset char addr+o )
+    .xt cstore # ( offset )
+    .lit 1
+    .xt add # ( offset+1 )
+    .xt console_key
+    .xt dup
+    .xt lit
     .dword 33
-    .dword xt_uless           # ( offset+1 char char<33? )
-    .dword xt_zbranch 
+    .xt uless           # ( offset+1 char char<33? )
+    .xt zbranch 
     .dword read_token_again # if it's not a space, read it
-    # .dword xt_branch
+    # .xt branch
     # .dword read_token_done
     read_token_done:          # ( offset whitespace-char )
-    .dword xt_drop
-    .dword xt_lit
+    .xt drop
+    .xt lit
     .dword token_buffer
-    .dword xt_swap            # ( addr offset )
-    .dword xt_exit
+    .xt swap            # ( addr offset )
+    .xt exit
 
     read_token_overflow: # ( offset char offset )
-    .dword xt_drop
-    .dword xt_drop
-    .dword xt_drop
+    .xt drop
+    .xt drop
+    .xt drop
 
     drop_overflow_char_again:
-    .dword xt_key
-    .dword xt_lit
+    .xt console_key
+    .xt lit
     .dword 33
-    .dword xt_uless # ( char<33? )
-    .dword xt_zbranch # if it's not whitespace, drop another
+    .xt uless # ( char<33? )
+    .xt zbranch # if it's not whitespace, drop another
     .dword drop_overflow_char_again
 
     # finally, exit
-    .dword xt_lit
+    .xt lit
     .dword token_buffer
-    .dword xt_lit
+    .xt lit
     .dword 0
-    .dword xt_exit # ( &token_buffer 0 )
+    .xt exit # ( &token_buffer 0 )
 
 
-
-xt_skip_blanks:
-    .dword docol
+# SKIP-BLANKS ( -- char )
+# skips whitespace until the first non-whitespace char
+# leaves non-whitespace char on the stack
+_word "SKIP-BLANKS", skip_blanks, docol, dict_read_token, 0
     
     skip_blanks_again:
-    .dword xt_key           # ( char )
-    .dword xt_dup           # ( char char )
-    .dword xt_lit
-    .dword 33               # ( char char 33 )
-    .dword xt_uless         # ( char char<33? )
-    .dword xt_zbranch
-    .dword skip_blanks_done   # zero means non whitespace, finish
-    .dword xt_drop
-    .dword xt_branch
-    .dword skip_blanks_again
+    .xt console_key       # ( char )
+    .xt dup 
+    .lit 33 
+    .xt uless                   # ( char char<33? )
+    .zbranch skip_blanks_done   # zero means non whitespace, finish
+    .xt drop                    # drop the whitespace char
+    .branch skip_blanks_again
     
     skip_blanks_done:
-    .dword xt_exit
+    .xt exit
 
 
-xt_here:
-    .dword docol
-    _fetch here_ptr
-    .dword xt_exit
+_word "HERE", here, docol, dict_skip_blanks, 0
+    .fetch here_ptr
+    .xt exit
 
-xt_comma: # ( xt -- )
-    .dword docol
-    .dword xt_here  # ( xt here_ptr )
-    .dword xt_swap  # ( here_ptr xt ) 
-    .dword xt_over  # ( here_ptr xt here_ptr )
-    .dword xt_store # ( here_ptr ) store xt at here_ptr
-    _lit CELL_BYTES
-    .dword xt_add   # ( here_ptr++ )
-    _lit here_ptr   # ( here_ptr+1 here_ptr )
-    .dword xt_store # increment here_ptr to next free memory cell
-    .dword xt_exit
+# 
+_word ",", comma, docol, dict_here, 0 # ( xt -- )
+    .xt here # ( xt here_ptr )
+    .xt swap over store # ( here_ptr ) store xt at here_ptr
+    .lit CELL_BYTES
+    .xt add   # ( here_ptr++ )
+    .lit here_ptr   # ( here_ptr+1 here_ptr )
+    .xt store exit # increment here_ptr to next free memory cell
 
-scratch:
-  .dword 0x4242424242424242
+_word "CONSOLE-KEY", console_key, docol, dict_comma, 0 # ( -- char )
+    .xt key     # raw input
+    .fetch echo_enabled
+    .zbranch console_key_done
+    .xt dup emit   # dup char and display it
+  console_key_done:
+    .xt exit
 
-xt_double:
-  .dword docol
+# IF: ( -- addr )
+# leaves the address of the branch instruction on the stack
+_word "IF", if, docol, dict_console_key, F_IMMEDIATE
+    .lit xt_zbranch
+    .xt comma      # append runtime branch instruction
+    .xt here       # retain address of its target cell
+    .lit 0
+    .xt comma      # compile placeholder 0
+    .xt exit
 
-double_body:
-  .dword xt_dup
-  .dword xt_add
-  .dword xt_exit
+# THEN: ( patch-addr -- )
+# Backpatches the current address to a given address in memory
+# Expected to be called after IF during compilation
+_word "THEN", then, docol, dict_if, F_IMMEDIATE
+    .xt here       # ( patch-address target-address )
+    .xt swap store # write the target address to the patch address
+    .xt exit
 
-xt_quadruple:
-  .dword docol
+# BEGIN: ( -- loop-start-addr )
+# Compilation word.
+_word "BEGIN", begin, docol, dict_then, F_IMMEDIATE
+    .xt here
+    .xt exit
 
-quadruple_body:
-  .dword xt_double
-  .dword xt_double
-  .dword xt_exit
+# UNTIL: ( loop-start-addr -- )
+# Compilation word.
+_word "UNTIL", until, docol, dict_begin, F_IMMEDIATE
+    .lit xt_zbranch   # ( loop-start-addr 0branch-xt )
+    .xt comma         # compile 0branch instruction
+    .xt comma         # compile loop-start-addr 
+    .xt exit
+_word "IMMEDIATE", immediate, docol, dict_until
+    .fetch latest_ptr
+    .lit 9 # ( addr 9 ) 9 is flags-offset
+    .xt add dup cfetch # ( dict-flag-addr flags)
+    .lit F_IMMEDIATE
+    .xt or # ( dict-flag-addr flags|F_IMMEDIATE )
+    .xt swap cstore
+    .xt exit
+
+
+# # ACCEPT: ( buffer capacity -- length )
+# # Accepts characters up to a newline, and returns length
+# # Handles backspaces and key echoing.
+# _word "ACCEPT", accept, docol, dict_equal, 0
+#     .lit 0 # push current char count of 0
+#     .xt begin # BEGIN: ( buffer capacity length )
+#     accept_loop:
+# 
+#       # get raw input
+#       .xt key     # ( buffer capacity len char ) 
+# 
+#       # handle optional echoing
+#       .fetch echo_enabled
+#       .zbranch echo_done
+#         .xt dup emit   # dup char and display it
+#       echo_done:
+# 
+#       # check if it's a backspace, if so, decrement len and loop
+#       # macro .equal: `DUP LIT <n> =`
+#       .equal 8 # ascii backspace
+#       .xt if
+#         .xt drop            # ( buffer capacity len )
+#         .xt minus_one       # ( buffer capacity len-1 )
+#         .branch accept_loop # continue
+#       .xt then
+# 
+#       # check if we're not at capacity. If so, push:
+#       # ( buffer capacity len char )
+#       .xt nrot twodup swap uless # ( buffer char capacity len len<capacity )
+#       .xt if             # ( buffer char capacity len )
+#         .xt plus_one     # ( buffer char capacity len+1 )
+#         .xt twoover swap # ( buffer char capacity len+1 char buffer )
+#         .xt cstore       # stores the char at the buffer.
+#       .xt then  # ( buffer char capacity len )
+#       .xt rot   # ( buffer capacity len char)
+#                 # check if it's a linefeed, if so, quit
+#       .equal 10 # ascii LF
+#       
+#     .xt until # UNTIL: char=='\n'
+#     .xt drop nip nip # ( len )
+# 
+#     .xt exit
+# 
+# _word "INTERPRET", interpret, docol, dict_accept, 0
 
 program:
   interpret_again:
-    .dword xt_read_token # ( addr len )
-    .dword xt_over
-    .dword xt_over
-    .dword xt_find # ( addr len entry|0 )
-    .dword xt_dup
-    _zbranch try_number 
-    .dword xt_nip
-    .dword xt_nip
+    .xt read_token # ( addr len )
+    .xt over
+    .xt over
+    .xt find # ( addr len entry|0 )
+    .xt dup
+    .zbranch try_number 
+    .xt nip
+    .xt nip
     # word found
 
     # check if we're compiling
-    _fetch compiling_ptr # ( entry compiling? )
-    _zbranch execute_entry # not compiling? execute it
+    .fetch compiling_ptr # ( entry compiling? )
+    .zbranch execute_entry # not compiling? execute it
 
     # otherwise, check if it's an immediate word
-    .dword xt_dup         # ( entry entry )
-    _fetch_entry_flags    # ( entry flags )
-    _lit F_IMMEDIATE      # ( entry flags F_IMMEDIATE )
-    .dword xt_and         # ( entry immediate? )
-    _zbranch compile_entry # if not immediate, then compile
+    .xt dup         # ( entry entry )
+    .fetch_entry_flags    # ( entry flags )
+    .lit F_IMMEDIATE      # ( entry flags F_IMMEDIATE )
+    .xt and         # ( entry immediate? )
+    .zbranch compile_entry # if not immediate, then compile
   execute_entry:
-    .dword xt_to_cfa      # ( xt )
-    .dword xt_execute     # do word
-    _branch interpret_again
+    .xt to_cfa      # ( xt )
+    .xt execute     # do word
+    .branch interpret_again
   compile_entry:
-    .dword xt_to_cfa       # ( xt )
-    .dword xt_comma        # compile xt to HERE and increment HERE
-    _branch interpret_again
+    .xt to_cfa       # ( xt )
+    .xt comma        # compile xt to HERE and increment HERE
+    .branch interpret_again
 
     # else, execute it
   try_number: # ( addr len 0 )
-    .dword xt_drop # ( addr len )
-    .dword xt_parse_number    # ( number success? )
-    _zbranch bad_token
-    _fetch compiling_ptr      # ( number compiling? )
-    _zbranch interpret_again  # interpreting, retain the number
-    _lit xt_lit               # ( number xt-of-LIT )
-    .dword xt_comma           # write xt_lit
-    .dword xt_comma           # write number
-    _branch interpret_again
+    .xt drop # ( addr len )
+    .xt parse_number    # ( number success? )
+    .zbranch bad_token
+    .fetch compiling_ptr      # ( number compiling? )
+    .zbranch interpret_again  # interpreting, retain the number
+    .lit xt_lit               # ( number xt-of-LIT )
+    .xt comma           # write xt_lit
+    .xt comma           # write number
+    .branch interpret_again
   bad_token:
-    .dword xt_drop
+    .xt drop
 
-    _lit 63
-    .dword xt_emit
+    .lit 63
+    .xt emit
     stop:
-    .dword xt_hang
+    .xt hang
 
-# program:
-#   .dword xt_lit
-#   .dword 33
-#   .dword xt_here
-#   .dword xt_lit
-#   .dword docol
-#   .dword xt_comma
-#   .dword xt_lit
-#   .dword xt_dup
-#   .dword xt_comma
-#   .dword xt_lit
-#   .dword xt_add
-#   .dword xt_comma
-#   .dword xt_lit
-#   .dword xt_exit
-#   .dword xt_comma
-#   .dword xt_execute
-#   .dword xt_emit
-#   .dword xt_hang 
-
+# state cells
 .balign CELL_BYTES
 compiling_ptr:
     .dword 0 # boolean flag, either 0 or -1 by convention
 latest_ptr:
-    .dword dict_colon
+    .dword dict_immediate
 pending_entry:
     .dword 0
+echo_enabled:
+    .dword -1
 
 token_buffer:
     .space 32
+
+accept_buffer:
+    .space 256
 
 .balign CELL_BYTES
 here_ptr:
